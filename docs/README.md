@@ -24,6 +24,7 @@
 | [实验要求与完成情况](experiment-status.md) | 实验①②逐项核对、现有证据、未完成事项 |
 | [采集与数据规范](data-protocol.md) | 采集协议、导出格式、质检、标定与评估边界 |
 | [验收与报告规范](acceptance.md) | 实时演示、报告三件套、提交材料与完成标准 |
+| [实时轨迹与现场投屏](live-demo.md) | Android 实时页面、scrcpy 连接与现场预演 |
 | [实施计划与维护规则](plan.md) | 任务顺序、交付物、文档更新约定 |
 
 技术使用与构建说明继续维护在 [Android README](../android-app/README.md) 和 [PDR README](../pdr/README.md)，这里不复制全部实现细节。
