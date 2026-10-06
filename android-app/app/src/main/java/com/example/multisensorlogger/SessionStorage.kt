@@ -33,6 +33,7 @@ data class SavedSession(
     val startedAt: String,
     val status: String,
     val durationSeconds: Long,
+    val qualitySummary: String,
 )
 
 class StreamMetrics(private val longGapThresholdNs: Long) {
@@ -119,6 +120,7 @@ class SessionWriter(
     val metrics = SensorStream.entries.associateWith { StreamMetrics(100_000_000L) }
     val locationMetrics = StreamMetrics(5_000_000_000L)
     private val warnings = initialWarnings.toMutableList()
+    private var registeredStreams: Set<SensorStream> = emptySet()
     private var closed = false
     var lastLocation: Location? = null
         private set
@@ -128,6 +130,11 @@ class SessionWriter(
             if (sensor == null) warnings.add("${stream.title}不可用")
         }
         saveManifest("recording")
+    }
+
+    fun setRegisteredStreams(streams: Set<SensorStream>) {
+        registeredStreams = streams.toSet()
+        checkpoint()
     }
 
     fun recordSensor(stream: SensorStream, event: SensorEvent) {
@@ -172,6 +179,11 @@ class SessionWriter(
         if (closed) return
         endedAtUtc = Instant.now()
         endedElapsedNs = SystemClock.elapsedRealtimeNanos()
+        SensorStream.entries.forEach { stream ->
+            val data = metrics.getValue(stream)
+            if (data.count == 0L) addWarning("${stream.title}没有样本")
+            if (data.longGapCount > 0) addWarning("${stream.title}存在 ${data.longGapCount} 次长间隔")
+        }
         if (locationMetrics.count == 0L) addWarning("本次采集没有取得位置点")
         writers.values.forEach { it.close() }
         locationWriter.close()
@@ -186,7 +198,9 @@ class SessionWriter(
             val sensor = sensors[stream]
             val data = metrics.getValue(stream).toJson()
                 .put("file", stream.fileName)
-                .put("available", sensor != null)
+                .put("available", stream in registeredStreams)
+                .put("sensor_present", sensor != null)
+                .put("listener_registered", stream in registeredStreams)
                 .put("requested_hz", 50)
                 .put("unit", stream.unit)
             if (sensor != null) {
@@ -196,6 +210,7 @@ class SessionWriter(
                     .put("resolution", sensor.resolution)
                     .put("max_range", sensor.maximumRange)
                     .put("min_delay_us", sensor.minDelay)
+                    .put("wake_up_sensor", sensor.isWakeUpSensor)
             }
             streamsJson.put(stream.name.lowercase(), data)
         }
@@ -299,11 +314,27 @@ object SessionStorage {
                         startedAt = json.optString("started_at_local", ""),
                         status = json.optString("status", "unknown"),
                         durationSeconds = json.optLong("duration_ms") / 1000,
+                        qualitySummary = qualitySummary(json),
                     )
                 }.getOrNull()
             }
             ?.sortedByDescending { it.id }
             ?: emptyList()
+    }
+
+    private fun qualitySummary(json: JSONObject): String {
+        val streams = json.optJSONObject("streams")
+        val imu = SensorStream.entries.joinToString("；") { stream ->
+            val data = streams?.optJSONObject(stream.name.lowercase())
+            val hz = if (data != null && !data.isNull("measured_hz")) {
+                String.format(java.util.Locale.US, "%.1f Hz", data.optDouble("measured_hz"))
+            } else "频率未知"
+            "${stream.title} ${data?.optLong("count") ?: 0} 条 / $hz / 长间隔 ${data?.optLong("long_gap_count") ?: 0} 次"
+        }
+        val warnings = json.optJSONArray("warnings")
+        val warningText = (0 until (warnings?.length() ?: 0)).joinToString("；") { warnings!!.optString(it) }
+        return "$imu\n位置 ${json.optJSONObject("location")?.optLong("count") ?: 0} 条" +
+            if (warningText.isBlank()) "" else "\n注意：$warningText"
     }
 
     fun exportZip(context: Context, sessionId: String, uri: Uri) {
