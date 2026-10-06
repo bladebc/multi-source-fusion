@@ -1,0 +1,17 @@
+# Android / Gradle build outputs and local state
+**/.gradle/
+**/.idea/
+**/build/
+**/local.properties
+**/.local/
+**/.kotlin/
+**/dist/
+
+# Signing material and generated packages
+*.jks
+*.keystore
+*.apk
+
+# OS/editor noise
+.DS_Store
+*.iml
