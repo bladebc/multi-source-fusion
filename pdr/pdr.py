@@ -32,7 +32,22 @@ def wrap180(a):
 def smooth(x, fs, win_s=SMOOTH_S):
     """滑动均值（第 2 课滑窗的复用）。"""
     w = max(1, int(round(win_s * fs)))
-    return np.convolve(x, np.ones(w) / w, mode="same")
+    return moving_mean(x, w)
+
+
+def moving_mean(x, w):
+    """长度为 w 点的滑动均值，输出与输入等长。
+
+    边缘用「延续端点值」补齐，而不是 np.convolve(mode="same") 默认的补 0——补 0 会让开头结尾的
+    重力估计只剩一半，凭空造出约 4 m/s² 的假冲击和假步（图书馆数据首尾各多数 1 步就是它）。
+    支持一维或按列处理的二维数组。
+    """
+    x = np.asarray(x, float)
+    if x.ndim == 2:
+        return np.column_stack([moving_mean(x[:, i], w) for i in range(x.shape[1])])
+    w = max(1, int(w))
+    xp = np.pad(x, (w // 2, w - 1 - w // 2), mode="edge")
+    return np.convolve(xp, np.ones(w) / w, mode="valid")
 
 
 # ============================================================ ① 步态检测
@@ -40,8 +55,8 @@ def detect_steps(acc_mag, fs=100, *, smooth_s=SMOOTH_S, thresh_ratio=THRESH_RATI
                  abs_floor=ABS_FLOOR, min_gap_s=MIN_GAP_S) -> list[float]:
     """|a−g| 平滑 + 峰检测，返回每个步时刻（秒，相对输入序列起点）。
 
-    acc_mag 应该是「去掉重力」的加速度模长 |a−g|（Android 的 linear acceleration
-    三轴求模即可）；如果你只有原始 |a|，先减去 9.8 再取绝对值。
+    acc_mag 是去掉重力后的加速度信号：课件用模长 |a−g|（快走时一步一峰）；
+    手持慢走推荐用 vertical_acc 的竖直分量（|a−g| 会一步两峰），此时 abs_floor 取 0.5 左右。
     """
     sm = smooth(np.asarray(acc_mag, float), fs, smooth_s)
     height = max(thresh_ratio * sm.mean(), abs_floor)
@@ -99,6 +114,19 @@ def mag_azimuth(acc, mag):
     return np.degrees(np.arctan2(H[:, 1], M[:, 1]))
 
 
+def vertical_acc(acc, fs, win_s=1.0):
+    """竖直方向的动态加速度（去掉重力后、沿「天」方向的分量，m/s²，向上为正）。
+
+    为什么用它数步：|a−g| 是总晃动量，手持慢走时手臂前后晃、蹬地都会贡献，一步常出现两个峰
+    （图书馆 22 m 实测：|a−g| 主频 3.0 Hz、数出 64 步；竖直分量主频 1.5 Hz、39 步，与 27 s 慢走吻合）。
+    竖直分量只看身体上下起伏，一步一峰。
+    """
+    w = max(1, int(win_s * fs))
+    g = moving_mean(acc, w)
+    gn = np.linalg.norm(g, axis=1)
+    return np.einsum("ij,ij->i", acc, g / gn[:, None]) - gn
+
+
 def gyro_vertical(acc, gyr, fs, win_s=1.0):
     """把陀螺读数投影到「竖直向上」方向，得到绕竖直轴的角速度（与 gyr 同单位）。
 
@@ -107,7 +135,7 @@ def gyro_vertical(acc, gyr, fs, win_s=1.0):
     手机平放时 up = (0,0,1)，结果就等于 gyro z。
     """
     w = max(1, int(win_s * fs))
-    up = np.column_stack([np.convolve(acc[:, i], np.ones(w) / w, "same") for i in range(3)])
+    up = moving_mean(acc, w)
     up /= np.linalg.norm(up, axis=1, keepdims=True)
     return np.einsum("ij,ij->i", gyr, up)
 

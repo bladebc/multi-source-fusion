@@ -25,28 +25,42 @@ plt.rcParams["axes.unicode_minus"] = False
 
 ap = argparse.ArgumentParser()
 ap.add_argument("data", type=Path)
-ap.add_argument("--alpha", type=float, default=0.98)
+ap.add_argument("--alpha", type=float, default=0.998,
+                help="互补滤波系数，50 Hz 逐点更新；0.998 ≈ τ 10 s（图书馆实测：0.98 偏离直线 1.87 m，0.998 仅 0.49 m）")
 ap.add_argument("--model", choices=["weinberg", "const"], default="weinberg")
 ap.add_argument("--calib", type=float, nargs=3, metavar=("T0", "T1", "DIST"),
                 help="标定 K：T0–T1 秒内走了已知的 DIST 米")
 ap.add_argument("--static", type=float, default=3.0, help="开头静止秒数，用于初始对准")
+ap.add_argument("--step-signal", choices=["vertical", "norm"], default="vertical",
+                help="步检信号：vertical 竖直动态加速度（默认，慢走不重复计步）/ norm 课件的 |a−g|")
+ap.add_argument("--trim", type=float, nargs=2, metavar=("T0", "T1"),
+                help="只用 T0–T1 秒（裁掉首尾按按钮的动作；建议从静止段开始）")
 args = ap.parse_args()
 
 d = load_sensors(args.data)
 base = args.data.with_suffix("") if args.data.suffix == ".zip" else args.data  # 输出图放在哪
 t, fs = d["t"], d["fs"]
 print(f"数据 {t[-1]:.0f} s，各传感器实测频率 {d['fs_real']} Hz（重采样到 {fs:.0f} Hz）")
+if args.trim:  # 裁剪后时间轴仍用原始秒数，--calib 里的时间照原样填
+    keep = (t >= args.trim[0]) & (t <= args.trim[1])
+    for k in ("acc", "gyr_dps", "mag", "lin_norm"):
+        d[k] = d[k][keep]
+    t = t[keep]
+    print(f"   只用 {t[0]:.1f}–{t[-1]:.1f} s")
 gt = pd.read_csv(base / "gt.csv") if (base / "gt.csv").exists() else None
 if gt is not None:
     gt["t"] -= d["t_offset"]  # loader 把时间轴对齐到「最晚开始的那个传感器」，真值时间跟着平移
 
 # ---- ① 步检
-steps = np.array(pdr.detect_steps(d["lin_norm"], fs))
-print(f"① 步检：{len(steps)} 步" + (f"（真值 {len(gt)-1} 步）" if gt is not None else ""))
+if args.step_signal == "vertical":
+    steps = np.array(pdr.detect_steps(pdr.vertical_acc(d["acc"], fs), fs, abs_floor=0.5)) + t[0]
+else:
+    steps = np.array(pdr.detect_steps(d["lin_norm"], fs)) + t[0]
+print(f"① 步检（{args.step_signal}）：{len(steps)} 步" + (f"（真值 {len(gt)-1} 步）" if gt is not None else ""))
 
 # ---- ② 步长：峰谷差在平滑后的 |a| 上取
 acc_norm_sm = pdr.smooth(np.linalg.norm(d["acc"], axis=1), fs)
-pv = pdr.peak_valley(acc_norm_sm, fs, steps)
+pv = pdr.peak_valley(acc_norm_sm, fs, steps - t[0])
 K = pdr.WEINBERG_K
 calib = args.calib
 if calib is None and gt is not None:  # 仿真：用第一条直边（真值）当「已知距离」
@@ -63,7 +77,7 @@ print(f"② 步长：{args.model}，均值 {L.mean():.2f} m，总里程 {L.sum()
 
 # ---- ③ 航向三源
 mag_az = pdr.mag_azimuth(d["acc"], d["mag"])
-psi0 = np.degrees(np.angle(np.exp(1j * np.radians(mag_az[t < args.static])).mean()))  # 初始对准：静止段磁航向的圆均值
+psi0 = np.degrees(np.angle(np.exp(1j * np.radians(mag_az[t < t[0] + args.static])).mean()))  # 初始对准：静止段磁航向的圆均值
 print(f"③ 初始对准：开头 {args.static:.0f} s 静止段磁航向 = {psi0:.1f}°")
 gz = pdr.gyro_vertical(d["acc"], d["gyr_dps"], fs)  # 绕竖直轴的角速度：手机斜拿也不怕
 # α 的「性格」取决于更新频率：时间常数 τ ≈ dt·α/(1−α)。课件「α=0.98，50 拍约 1 分钟」是按每步（~1 Hz）
@@ -100,11 +114,19 @@ for (name, psi), c in zip(sources.items(), ["#dc2626", "#f59e0b", "#2563eb"]):
     if gt is not None:
         e_end, e_mean = err_vs_gt(x, y)
         tag = f"  终点误差 {e_end:.1f} m · 平均误差 {e_mean:.1f} m"
+    else:  # 没有真值：给出起终点距离与偏离起终点连线的程度（走直线时就是「直线度」）
+        P = np.c_[x, y]
+        chord = P[-1] - P[0]
+        D = float(np.hypot(*chord))
+        n = np.array([-chord[1], chord[0]]) / D if D > 0 else np.zeros(2)
+        dev = np.abs((P - P[0]) @ n)
+        tag = f"  起终点 {D:.1f} m · 偏离直线 RMS {np.sqrt((dev**2).mean()):.2f} m / 最大 {dev.max():.2f} m"
     print(f"④ {name:12s}{tag}")
     ax[0].plot(x, y, "-", c=c, lw=1.3, label=name + tag)
     ax[1].plot(t, unwrap_deg(psi), c=c, lw=.8, label=name)
 ax[0].plot(0, 0, "g*", ms=15)
-ax[0].set_aspect("equal"); ax[0].legend(fontsize=8, loc="best"); ax[0].grid(alpha=.3)
+ax[0].set_aspect("equal"); ax[0].grid(alpha=.3)
+ax[0].legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.1))  # 图例放图下方，免得盖住轨迹
 ax[0].set_xlabel("东 E (m)"); ax[0].set_ylabel("北 N (m)"); ax[0].set_title("PDR 轨迹：只换航向源")
 ax[1].plot(t, unwrap_deg(mag_az), c="#999", lw=.3, label="磁航向（原始）", zorder=0)
 ax[1].legend(fontsize=8); ax[1].set_xlabel("t (s)"); ax[1].set_ylabel("航向 ψ (°)")
@@ -118,7 +140,7 @@ print(f"图已保存：{out}")
 
 # ---- α 扫描：没有正确答案，只有「输入质量决定的妥协」
 if gt is not None:
-    alphas = [0, .5, .8, .9, .95, .97, .98, .99, .995, .999, 1]
+    alphas = [0, .5, .8, .9, .95, .97, .98, .99, .995, .998, .999, 1]
     res = [err_vs_gt(*pdr.run_pdr(steps, L, t, pdr.heading_series(t, gz, mag_az, a, psi0))) for a in alphas]
     print("α 扫描：")
     for a, (e, m) in zip(alphas, res):

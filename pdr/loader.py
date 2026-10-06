@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from pdr import moving_mean
+
 
 TEAM_FILES = {"acc": "accelerometer.csv", "gyr": "gyroscope.csv", "mag": "magnetometer.csv"}
 
@@ -77,7 +79,7 @@ def load_sensors(path, fs=50.0):
     else:
         # 没有系统的 linear acceleration：用 1 s 滑动均值当重力估计，减掉后求模
         w = int(fs)
-        grav = np.column_stack([np.convolve(acc[:, i], np.ones(w) / w, "same") for i in range(3)])
+        grav = moving_mean(acc, w)
         lin_norm = np.linalg.norm(acc - grav, axis=1)
 
     return {
