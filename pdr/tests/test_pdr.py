@@ -58,6 +58,12 @@ class PdrRegressionTests(unittest.TestCase):
                                         [0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0]*5)
         self.assertEqual((end, mean), (0., 0.))
 
+    def test_trimmed_trajectory_start_uses_trim_time(self):
+        # A trajectory beginning at 6 s must not compare its origin to truth at 0 s.
+        self.assertEqual(pdr.trajectory_error([0, 1], [0, 0], [7],
+                                             [0, 6, 7], [100, 0, 1], [0, 0, 0],
+                                             start_time=6), (0., 0.))
+
     def test_error_excludes_times_outside_truth(self):
         self.assertEqual(pdr.trajectory_error([0, 1, 2], [0, 0, 0], [1, 2],
                                              [1, 2], [1, 2], [0, 0]), (0., 0.))

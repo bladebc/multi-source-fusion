@@ -97,4 +97,4 @@ uv run python run_pdr.py ../data/session_20261006_081737_496_fe4b5910.zip --trim
 
 `--calib` 时间相对三路 IMU 的共同起点，要求 `裁剪起点 ≤ T0 < T1 ≤ 记录结束时间`、距离为正且区间内有有效步。轨迹误差按每个检测步的时间插值真值，只统计真值覆盖时刻；末次共同时间误差与整个记录的闭合终点误差应区分。
 
-运行 `uv run python -m unittest discover -s tests -v` 执行 9 项回归测试。GitHub Actions 在 push 和 PR 时运行相同测试。更新后仿真及仓库样例 ZIP 全链均通过；仿真数字仅验证算法流程，不能替代真实步行精度验收。课件锚数据尚未重新下载验证，表中对应数字保留为原作者的历史结果。
+运行 `uv run python -m unittest discover -s tests -v` 执行 10 项回归测试。GitHub Actions 在 push 和 PR 时运行相同测试。更新后仿真及仓库样例 ZIP 全链均通过；仿真数字仅验证算法流程，不能替代真实步行精度验收。课件锚数据尚未重新下载验证，表中对应数字保留为原作者的历史结果。
