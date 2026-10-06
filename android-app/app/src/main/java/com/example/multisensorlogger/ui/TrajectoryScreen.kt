@@ -25,6 +25,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -77,7 +78,8 @@ fun TrajectoryScreen(
             if (preparationSeconds > 0) {
                 Text(
                     "$preparationSeconds",
-                    modifier = Modifier.align(Alignment.Center),
+                    // 放在上方，不挡住画布中央的起点
+                    modifier = Modifier.align(BiasAlignment(0f, -0.55f)),
                     style = MaterialTheme.typography.displayLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,

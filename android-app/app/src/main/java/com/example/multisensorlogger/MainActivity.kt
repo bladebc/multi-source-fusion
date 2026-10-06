@@ -29,6 +29,7 @@ import com.example.multisensorlogger.ui.AppScreen
 import com.example.multisensorlogger.ui.AppTheme
 import com.example.multisensorlogger.ui.Toast
 import com.example.multisensorlogger.ui.fmt3
+import com.example.multisensorlogger.ui.formatStartedAt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity(), AppActions {
             RecorderBus.update { it.copy(pdr = it.pdr.copy(config = pdrConfig)) }
         }
         refreshSavedSessions()
+        showLatestTrackIfIdle()
         updateSensorAvailability()
 
         setContent {
@@ -227,6 +229,26 @@ class MainActivity : ComponentActivity(), AppActions {
 
     private fun refreshSavedSessions() {
         savedSessions = SessionStorage.list(this)
+    }
+
+    /**
+     * 进程被系统回收或被划掉后，内存里的实时轨迹就没了；没在采集时从最近一条记录的 pdr.csv 读回来，
+     * 演示前后切出 App 再回来，轨迹页仍有内容。
+     */
+    private fun showLatestTrackIfIdle() {
+        val state = RecorderBus.state.value
+        if (state.recording || state.pdr.steps.isNotEmpty()) return
+        val latest = savedSessions.firstOrNull { it.pdrSummary != null && it.status != "recording" } ?: return
+        lifecycleScope.launch {
+            val steps = withContext(Dispatchers.IO) { SessionStorage.loadPdrSteps(this@MainActivity, latest.id) }
+            if (steps.isNullOrEmpty() || RecorderBus.state.value.recording) return@launch
+            RecorderBus.update {
+                it.copy(
+                    pdr = it.pdr.copy(steps = steps, distanceM = steps.sumOf { s -> s.length }, headingDeg = null),
+                    message = "上次记录 ${formatStartedAt(latest.startedAt)}",
+                )
+            }
+        }
     }
 
     private fun exportTo(uri: Uri) {

@@ -25,6 +25,8 @@ private val LightColors = lightColorScheme(
     primaryContainer = Color(0xFFD6E3F7),
     onPrimaryContainer = Color(0xFF0B2547),
     secondary = Color(0xFF4D5B6B),
+    secondaryContainer = Color(0xFFDCE3EC),
+    onSecondaryContainer = Color(0xFF1B2733),
     tertiary = Color(0xFF2E7D4F),
     error = Color(0xFFB3261E),
     background = Color(0xFFF7F5F0),
@@ -33,7 +35,11 @@ private val LightColors = lightColorScheme(
     onSurface = Color(0xFF1B1F24),
     surfaceVariant = Color(0xFFE9E6DE),
     onSurfaceVariant = Color(0xFF4A4F57),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF2F0EA),
     surfaceContainer = Color(0xFFEFEDE6),
+    surfaceContainerHigh = Color(0xFFE9E7E0),
+    surfaceContainerHighest = Color(0xFFE4E1D9),
     outline = Color(0xFF8A8F98),
     outlineVariant = Color(0xFFD3D0C8),
 )
@@ -44,6 +50,8 @@ private val DarkColors = darkColorScheme(
     primaryContainer = Color(0xFF1D3A66),
     onPrimaryContainer = Color(0xFFD6E3F7),
     secondary = Color(0xFFB7C3D1),
+    secondaryContainer = Color(0xFF2A3646),
+    onSecondaryContainer = Color(0xFFD6DEE8),
     tertiary = Color(0xFF7FD3A0),
     error = Color(0xFFFFB4AB),
     background = Color(0xFF0F1620),
@@ -52,7 +60,11 @@ private val DarkColors = darkColorScheme(
     onSurface = Color(0xFFE3E6EB),
     surfaceVariant = Color(0xFF1C2532),
     onSurfaceVariant = Color(0xFFB4BCC8),
+    surfaceContainerLowest = Color(0xFF0A1018),
+    surfaceContainerLow = Color(0xFF131A25),
     surfaceContainer = Color(0xFF161E2A),
+    surfaceContainerHigh = Color(0xFF1A2330),
+    surfaceContainerHighest = Color(0xFF1F2937),
     outline = Color(0xFF6F7887),
     outlineVariant = Color(0xFF2A3442),
 )
@@ -106,6 +118,11 @@ fun ListIcon(color: Color) = Canvas(Modifier.size(24.dp)) {
 fun fmt1(v: Double): String = String.format(Locale.US, "%.1f", v)
 fun fmt3(v: Double): String = String.format(Locale.US, "%.3f", v)
 fun formatDuration(seconds: Long): String = "%02d:%02d".format(seconds / 60, seconds % 60)
+
+/** session.json 的 ISO 时间 → 「10-06 17:05:06」；解析不了就原样返回。 */
+fun formatStartedAt(iso: String): String = runCatching {
+    java.time.OffsetDateTime.parse(iso).format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm:ss"))
+}.getOrDefault(iso)
 
 /** 航向 → 「16° 北」式读法：度数 + 八方位（顺时针从北量）。 */
 fun headingText(deg: Double): String {

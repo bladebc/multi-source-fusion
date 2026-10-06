@@ -5,10 +5,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -68,7 +68,7 @@ fun SessionsScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "共 ${sessions.size} 条，记录只存在本机，卸载 App 会一并删除",
+                "${sessions.size} 条 · 只存在本机，卸载即删除",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -101,7 +101,7 @@ fun SessionsScreen(
         AlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("删除这条记录？") },
-            text = { Text("${session.title}\n${session.startedAt}\n\n删除后无法恢复；需要保留的请先导出 ZIP。") },
+            text = { Text("${session.title}\n${formatStartedAt(session.startedAt)}\n\n删除后无法恢复；需要保留的请先导出 ZIP。") },
             confirmButton = {
                 TextButton(onClick = { onDelete(session); deleting = null }, enabled = !recording || session.status != "recording") {
                     Text("删除", color = MaterialTheme.colorScheme.error)
@@ -134,7 +134,7 @@ private fun SessionRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Text(session.startedAt, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(formatStartedAt(session.startedAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         session.pdrSummary?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
         if (expanded) {
             Text(session.qualitySummary, style = MaterialTheme.typography.bodySmall)
@@ -175,13 +175,20 @@ private fun ReplayDialog(session: SavedSession, config: PdrConfig, onSaveK: (Dou
         }
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    // 自己处理系统栏与键盘的内边距：键盘弹出时压缩轨迹图，而不是把整个弹窗推出屏幕
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("轨迹回放", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                        Text(session.startedAt, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${session.title} · ${formatStartedAt(session.startedAt)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(onClick = onDismiss) { Text("关闭") }
                 }
@@ -238,7 +245,6 @@ private fun Calibration(
         Button(
             onClick = { newK?.let(onSaveK) },
             enabled = newK != null && newK in com.example.multisensorlogger.pdr.PdrSettings.K_RANGE,
-            modifier = Modifier.fillMaxHeight(),
         ) { Text("保存为 K") }
     }
     when {

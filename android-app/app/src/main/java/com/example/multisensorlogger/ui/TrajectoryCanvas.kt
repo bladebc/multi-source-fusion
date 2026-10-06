@@ -5,6 +5,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -46,7 +47,10 @@ fun TrajectoryCanvas(
     val description = if (last == null) emptyHint else
         "轨迹 ${steps.size} 步，当前位置东 ${fmt1(last.x)} 米、北 ${fmt1(last.y)} 米"
 
-    Canvas(modifier.semantics { contentDescription = description }) {
+    // Canvas 默认不裁剪，超出边界的网格线会画到相邻控件上
+    Canvas(modifier.clipToBounds().semantics { contentDescription = description }) {
+        // 尺寸为 0 时 scale = 0，网格循环的上界变成无穷大会卡死主线程
+        if (size.width < 1f || size.height < 1f) return@Canvas
         drawRect(colors.surfaceContainer)
         // ---- 视野：包含起点与全部步，留 12% 边距，至少 8 m
         var minX = 0.0; var maxX = 0.0; var minY = 0.0; var maxY = 0.0
@@ -67,17 +71,16 @@ fun TrajectoryCanvas(
         val grid = GRID_STEPS.firstOrNull { span / it <= 8 } ?: GRID_STEPS.last()
         val halfW = size.width / 2 / scale
         val halfH = size.height / 2 / scale
-        var gx = floor((cx - halfW) / grid) * grid
-        while (gx <= cx + halfW) {
-            val p = toScreen(gx, 0.0)
+        // 线数再加一道上限，任何异常尺寸下都不会画成死循环
+        val x0 = floor((cx - halfW) / grid).toInt()
+        for (i in x0..x0 + min(200, (2 * halfW / grid).toInt() + 1)) {
+            val p = toScreen(i * grid, 0.0)
             drawLine(colors.outlineVariant, Offset(p.x, 0f), Offset(p.x, size.height), 1.dp.toPx())
-            gx += grid
         }
-        var gy = floor((cy - halfH) / grid) * grid
-        while (gy <= cy + halfH) {
-            val p = toScreen(0.0, gy)
+        val y0 = floor((cy - halfH) / grid).toInt()
+        for (i in y0..y0 + min(200, (2 * halfH / grid).toInt() + 1)) {
+            val p = toScreen(0.0, i * grid)
             drawLine(colors.outlineVariant, Offset(0f, p.y), Offset(size.width, p.y), 1.dp.toPx())
-            gy += grid
         }
         val gridLabel = "每格 ${if (grid < 1) fmt1(grid) else grid.toInt().toString()} m"
         drawText(measurer, gridLabel, Offset(8.dp.toPx(), size.height - 22.dp.toPx()), labelStyle)

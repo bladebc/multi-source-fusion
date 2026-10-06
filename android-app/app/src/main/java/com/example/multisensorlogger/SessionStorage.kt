@@ -348,6 +348,29 @@ object SessionStorage {
         return replayRecording(config) { name -> File(directory, name).takeIf { it.isFile }?.inputStream() }
     }
 
+    /** 读回采集时实时写下的 pdr.csv；1.x 的记录或文件损坏时返回 null。 */
+    fun loadPdrSteps(context: Context, sessionId: String): List<PdrStep>? {
+        val file = File(directoryOf(context, sessionId), PDR_FILE)
+        if (!file.isFile) return null
+        return runCatching {
+            file.readLines(StandardCharsets.UTF_8).drop(1).mapNotNull { line ->
+                val c = line.split(',')
+                if (c.size < 9) return@mapNotNull null
+                PdrStep(
+                    number = c[0].toInt(),
+                    timestampNs = c[1].toLong(),
+                    timeS = c[2].toDouble(),
+                    peak = c[3].toDouble(),
+                    valley = c[4].toDouble(),
+                    length = c[5].toDouble(),
+                    headingDeg = c[6].toDouble(),
+                    x = c[7].toDouble(),
+                    y = c[8].toDouble(),
+                )
+            }
+        }.getOrNull()
+    }
+
     fun delete(context: Context, sessionId: String) {
         val directory = directoryOf(context, sessionId)
         require(directory.isDirectory) { "采集记录不存在" }
@@ -385,7 +408,10 @@ object SessionStorage {
                     val json = JSONObject(File(directory, "session.json").readText(StandardCharsets.UTF_8))
                     SavedSession(
                         id = directory.name,
-                        title = json.optString("mode_title", "采集记录"),
+                        // 手动采集时标签才是用户写的「这条录的是什么」
+                        title = json.optString("label").takeIf {
+                            json.optString("mode") == "manual" && it.isNotBlank() && it != "自由采集"
+                        } ?: json.optString("mode_title", "采集记录"),
                         startedAt = json.optString("started_at_local", ""),
                         status = json.optString("status", "unknown"),
                         durationSeconds = json.optLong("duration_ms") / 1000,
@@ -403,9 +429,9 @@ object SessionStorage {
         if (!pdr.optBoolean("enabled")) return "实时 PDR 未启用"
         val k = pdr.optJSONObject("config")?.optDouble("weinberg_k")
         return String.format(
-            java.util.Locale.US, "实时 PDR %d 步 · %.1f m · 终点 (%.1f, %.1f) m · K %.3f",
+            java.util.Locale.US, "PDR %d 步 · 里程 %.1f m · 离起点 %.1f m · K %.3f",
             pdr.optInt("step_count"), pdr.optDouble("distance_m"),
-            pdr.optDouble("end_x_m"), pdr.optDouble("end_y_m"), k ?: Double.NaN,
+            kotlin.math.hypot(pdr.optDouble("end_x_m"), pdr.optDouble("end_y_m")), k ?: Double.NaN,
         )
     }
 
