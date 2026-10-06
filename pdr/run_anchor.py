@@ -17,8 +17,9 @@ import pandas as pd
 
 import pdr
 
-plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "WenQuanYi Micro Hei", "SimHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+from plot_config import configure_fonts
+
+configure_fonts()
 
 FS = 50
 ANCHOR_URL = "http://10.112.165.210:9000/multi_source_fusion/lesson03_pdr/demos/d08_anchor_data.js"

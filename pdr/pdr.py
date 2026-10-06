@@ -43,6 +43,8 @@ def moving_mean(x, w):
     支持一维或按列处理的二维数组。
     """
     x = np.asarray(x, float)
+    if x.size == 0:
+        return x.copy()
     if x.ndim == 2:
         return np.column_stack([moving_mean(x[:, i], w) for i in range(x.shape[1])])
     w = max(1, int(w))
@@ -93,7 +95,13 @@ def step_length(peak_val, valley_val, *, model="weinberg", K=WEINBERG_K) -> floa
 
 def calibrate_K(peak_valleys, known_distance_m):
     """走一段已知距离 D：Σ K·⁴√Δ = D  ⇒  K = D / Σ ⁴√Δ。"""
+    if not np.isfinite(known_distance_m) or known_distance_m <= 0:
+        raise ValueError("标定距离必须为有限正数")
+    if not all(np.isfinite(p) and np.isfinite(v) for p, v in peak_valleys):
+        raise ValueError("标定峰谷包含无效值")
     s = sum(max(p - v, 0.0) ** 0.25 for p, v in peak_valleys)
+    if s <= 0:
+        raise ValueError("标定区间没有有效步，请检查时间区间、动作和检测阈值")
     return known_distance_m / s
 
 
@@ -177,3 +185,17 @@ def run_pdr(step_times, lengths, t_heading, psi_series, x0=0.0, y0=0.0):
         xs.append(xs[-1] + L * np.sin(psi))
         ys.append(ys[-1] + L * np.cos(psi))
     return np.array(xs), np.array(ys)
+
+
+def trajectory_error(x, y, step_times, gt_t, gt_x, gt_y, start_time=0.0):
+    """在同一时间比较位置，仅评估真值覆盖的时刻。"""
+    times = np.r_[start_time, step_times]
+    gt_t, gt_x, gt_y = [np.asarray(v, dtype=float) for v in (gt_t, gt_x, gt_y)]
+    if len(gt_t) < 2 or np.any(np.diff(gt_t) <= 0):
+        raise ValueError("真值至少需要两个严格递增时间戳")
+    valid = (times >= gt_t[0]) & (times <= gt_t[-1])
+    if not valid.any():
+        raise ValueError("轨迹与真值没有共同时间范围")
+    errors = np.hypot(np.asarray(x)[valid] - np.interp(times[valid], gt_t, gt_x),
+                      np.asarray(y)[valid] - np.interp(times[valid], gt_t, gt_y))
+    return float(errors[-1]), float(errors.mean())

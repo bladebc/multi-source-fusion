@@ -50,23 +50,37 @@ def read_raw(path):
     return pd.concat(parts, ignore_index=True)
 
 
-def load_sensors(path, fs=50.0):
+def load_sensors(path, fs=50.0, max_gap_s=0.1):
     """返回 dict：t（秒，从 0 起）、acc/gyr/mag（N×3）、lin_norm（|a−g|）、fs_real（各传感器实测频率）。
 
     t_offset：统一时间轴的 0 点相对「最早一条读数」晚了多少秒（三路传感器都开始出数才算 0 点）。
     """
+    if not np.isfinite(fs) or fs <= 0 or not np.isfinite(max_gap_s) or max_gap_s <= 0:
+        raise ValueError("采样频率和允许的最大间隔必须为正数")
     df = read_raw(path)
+    if df.empty or not np.isfinite(df[["t_ns", "x", "y", "z"]].to_numpy(dtype=float)).all():
+        raise ValueError("记录为空或含非有限传感器值")
     df["t"] = (df.t_ns - df.t_ns.min()) * 1e-9
     groups = {k: g.sort_values("t") for k, g in df.groupby("type")}
     missing = {"acc", "gyr", "mag"} - groups.keys()
     if missing:
         raise ValueError(f"缺少传感器：{missing}")
 
+    groups = {k: groups[k] for k in ("acc", "gyr", "mag", "lin") if k in groups}
+    for k, g in groups.items():
+        gaps = np.diff(g.t.values)
+        if len(g) < 2 or np.any(gaps <= 0):
+            raise ValueError(f"{k} 至少需要两个不同时间戳，且不能有重复时间戳")
+        if gaps.max() > max_gap_s + 1e-9:
+            raise ValueError(f"{k} 存在 {gaps.max():.3f} s 断流（允许 {max_gap_s:.3f} s）；请分段分析，不跨断流插值")
+
     # 实验报告要写「实测频率」而不是申请的档位（第 1 课传感器篇）
     fs_real = {k: round(1 / np.median(np.diff(g.t.values)), 1) for k, g in groups.items()}
 
     t0 = max(g.t.iloc[0] for g in groups.values())
     t1 = min(g.t.iloc[-1] for g in groups.values())
+    if t1 - t0 < 1.0:
+        raise ValueError("三路传感器共同记录不足 1 秒，无法进行可靠 PDR 分析")
     t = np.arange(t0, t1, 1 / fs)
 
     def interp(k):
@@ -78,7 +92,7 @@ def load_sensors(path, fs=50.0):
         lin_norm = np.linalg.norm(interp("lin"), axis=1)
     else:
         # 没有系统的 linear acceleration：用 1 s 滑动均值当重力估计，减掉后求模
-        w = int(fs)
+        w = max(1, int(fs))
         grav = moving_mean(acc, w)
         lin_norm = np.linalg.norm(acc - grav, axis=1)
 

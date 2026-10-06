@@ -20,8 +20,9 @@ import pandas as pd
 import pdr
 from loader import load_sensors
 
-plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "WenQuanYi Micro Hei", "SimHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+from plot_config import configure_fonts
+
+configure_fonts()
 
 ap = argparse.ArgumentParser()
 ap.add_argument("data", type=Path)
@@ -37,12 +38,21 @@ ap.add_argument("--trim", type=float, nargs=2, metavar=("T0", "T1"),
                 help="只用 T0–T1 秒（裁掉首尾按按钮的动作；建议从静止段开始）")
 args = ap.parse_args()
 
-d = load_sensors(args.data)
+if not 0 <= args.alpha <= 1 or not np.isfinite(args.static) or args.static <= 0:
+    ap.error("alpha 必须在 [0, 1] 内，static 必须为有限正数")
+try:
+    d = load_sensors(args.data)
+except ValueError as error:
+    ap.error(str(error))
 base = args.data.with_suffix("") if args.data.suffix == ".zip" else args.data  # 输出图放在哪
 t, fs = d["t"], d["fs"]
 print(f"数据 {t[-1]:.0f} s，各传感器实测频率 {d['fs_real']} Hz（重采样到 {fs:.0f} Hz）")
 if args.trim:  # 裁剪后时间轴仍用原始秒数，--calib 里的时间照原样填
+    if not all(np.isfinite(v) for v in args.trim) or not 0 <= args.trim[0] < args.trim[1] <= t[-1]:
+        ap.error("裁剪时间必须满足 0 ≤ T0 < T1 ≤ 记录时长")
     keep = (t >= args.trim[0]) & (t <= args.trim[1])
+    if keep.sum() < fs:
+        ap.error("裁剪后不足 1 秒")
     for k in ("acc", "gyr_dps", "mag", "lin_norm"):
         d[k] = d[k][keep]
     t = t[keep]
@@ -68,8 +78,13 @@ if calib is None and gt is not None:  # 仿真：用第一条直边（真值）�
     calib = (0, leg_end, float(gt.y.max()))
 if calib:
     t0, t1, D = calib
+    if not all(np.isfinite(v) for v in calib) or not t[0] <= t0 < t1 <= t[-1]:
+        ap.error("标定时间必须满足 0 ≤ T0 < T1 ≤ 记录时长")
     sel = [p for s, p in zip(steps, pv) if t0 <= s <= t1]
-    K = pdr.calibrate_K(sel, D)
+    try:
+        K = pdr.calibrate_K(sel, D)
+    except ValueError as error:
+        ap.error(str(error))
     print(f"② 标定：{t0:.0f}–{t1:.0f} s 内 {len(sel)} 步走 {D:.1f} m → K = {K:.3f}")
 L = np.array([pdr.step_length(p, v, model=args.model, K=K) for p, v in pv])
 print(f"② 步长：{args.model}，均值 {L.mean():.2f} m，总里程 {L.sum():.1f} m"
@@ -93,11 +108,7 @@ sources = {
 
 # ---- ④ 轨迹 + 误差
 def err_vs_gt(x, y):
-    """终点误差 + 每步位置误差均值（按步序号对齐真值；步数不同时按比例对齐）。"""
-    end = float(np.hypot(x[-1] - gt.x.iloc[-1], y[-1] - gt.y.iloc[-1]))
-    idx = np.linspace(0, len(gt) - 1, len(x)).round().astype(int)
-    mean = float(np.hypot(x - gt.x.values[idx], y - gt.y.values[idx]).mean())
-    return end, mean
+    return pdr.trajectory_error(x, y, steps, gt.t.values, gt.x.values, gt.y.values, start_time=t[0])
 
 
 def unwrap_deg(a):
@@ -113,7 +124,7 @@ for (name, psi), c in zip(sources.items(), ["#dc2626", "#f59e0b", "#2563eb"]):
     tag = ""
     if gt is not None:
         e_end, e_mean = err_vs_gt(x, y)
-        tag = f"  终点误差 {e_end:.1f} m · 平均误差 {e_mean:.1f} m"
+        tag = f"  末次共同时间误差 {e_end:.1f} m · 平均误差 {e_mean:.1f} m"
     else:  # 没有真值：给出起终点距离与偏离起终点连线的程度（走直线时就是「直线度」）
         P = np.c_[x, y]
         chord = P[-1] - P[0]
@@ -144,4 +155,4 @@ if gt is not None:
     res = [err_vs_gt(*pdr.run_pdr(steps, L, t, pdr.heading_series(t, gz, mag_az, a, psi0))) for a in alphas]
     print("α 扫描：")
     for a, (e, m) in zip(alphas, res):
-        print(f"   α={a:<6} τ≈{tau(a):6.1f} s   终点 {e:5.1f} m   平均 {m:5.1f} m")
+        print(f"   α={a:<6} τ≈{tau(a):6.1f} s   末次共同时间 {e:5.1f} m   平均 {m:5.1f} m")
