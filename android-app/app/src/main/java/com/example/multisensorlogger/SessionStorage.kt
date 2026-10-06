@@ -7,6 +7,11 @@ import android.location.Location
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import com.example.multisensorlogger.pdr.PdrConfig
+import com.example.multisensorlogger.pdr.PdrEngine
+import com.example.multisensorlogger.pdr.PdrStep
+import com.example.multisensorlogger.pdr.replayRecording
+import com.example.multisensorlogger.pdr.toJson
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedWriter
@@ -34,6 +39,8 @@ data class SavedSession(
     val status: String,
     val durationSeconds: Long,
     val qualitySummary: String,
+    /** 采集时的实时 PDR 结果摘要；1.x 版本的记录没有，为 null。 */
+    val pdrSummary: String?,
 )
 
 class StreamMetrics(private val longGapThresholdNs: Long) {
@@ -101,6 +108,7 @@ class SessionWriter(
     val locationProvider: String?,
     private val locationPermission: String,
     initialWarnings: List<String>,
+    private val pdrConfig: PdrConfig?,
 ) {
     val id: String = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")
         .withZone(java.time.ZoneOffset.UTC)
@@ -117,6 +125,11 @@ class SessionWriter(
         File(directory, "gnss.csv"),
         "timestamp_elapsed_ns,latitude_deg,longitude_deg,altitude_m,horizontal_accuracy_m,speed_mps,bearing_deg,provider",
     )
+    private val pdrWriter = newWriter(
+        File(directory, PDR_FILE),
+        "step,timestamp_elapsed_ns,time_s,peak_mps2,valley_mps2,length_m,heading_deg,x_m,y_m",
+    )
+    private var pdrState = JSONObject()
     val metrics = SensorStream.entries.associateWith { StreamMetrics(100_000_000L) }
     val locationMetrics = StreamMetrics(5_000_000_000L)
     private val warnings = initialWarnings.toMutableList()
@@ -164,6 +177,27 @@ class SessionWriter(
         lastLocation = location
     }
 
+    /** 实时 PDR 每确认一步写一行；坐标为 ENU（x 东、y 北，米），时间相对 PDR 网格 0 点。 */
+    fun recordStep(step: PdrStep) {
+        if (closed) return
+        pdrWriter.write(
+            "${step.number},${step.timestampNs},${fmt(step.timeS)},${fmt(step.peak)},${fmt(step.valley)}," +
+                "${fmt(step.length)},${fmt(step.headingDeg)},${fmt(step.x)},${fmt(step.y)}\n",
+        )
+    }
+
+    /** 由采集服务在 checkpoint / 结束前更新，写入 session.json 的 pdr 块。 */
+    fun updatePdr(engine: PdrEngine) {
+        pdrState = JSONObject()
+            .put("grid_origin_elapsed_ns", engine.gridOriginNs ?: JSONObject.NULL)
+            .put("initial_heading_deg", engine.psi0 ?: JSONObject.NULL)
+            .put("step_count", engine.steps.size)
+            .put("distance_m", engine.distanceM)
+            .put("end_x_m", engine.x)
+            .put("end_y_m", engine.y)
+            .put("dropped_out_of_order_samples", engine.droppedSamples)
+    }
+
     fun addWarning(warning: String) {
         if (warning !in warnings) warnings.add(warning)
     }
@@ -172,6 +206,7 @@ class SessionWriter(
         if (closed) return
         writers.values.forEach { it.flush() }
         locationWriter.flush()
+        pdrWriter.flush()
         saveManifest("recording")
     }
 
@@ -187,6 +222,7 @@ class SessionWriter(
         if (locationMetrics.count == 0L) addWarning("本次采集没有取得位置点")
         writers.values.forEach { it.close() }
         locationWriter.close()
+        pdrWriter.close()
         closed = true
         saveManifest(status)
     }
@@ -221,7 +257,7 @@ class SessionWriter(
             .put("permission", locationPermission)
             .put("gps_provider_used", locationProvider == "gps")
         val json = JSONObject()
-            .put("schema_version", 1)
+            .put("schema_version", 2)
             .put("id", id)
             .put("status", status)
             .put("mode", spec.mode.name.lowercase())
@@ -241,6 +277,7 @@ class SessionWriter(
                 .put("android_api", Build.VERSION.SDK_INT))
             .put("streams", streamsJson)
             .put("location", locationJson)
+            .put("pdr", pdrJson())
             .put("segments", segments(durationNs))
             .put("warnings", JSONArray(warnings))
 
@@ -251,6 +288,16 @@ class SessionWriter(
             target.writeText(json.toString(2), StandardCharsets.UTF_8)
             temp.delete()
         }
+    }
+
+    private fun pdrJson(): JSONObject {
+        val json = JSONObject()
+            .put("file", PDR_FILE)
+            .put("enabled", pdrConfig != null)
+            .put("frame", "ENU: x east, y north (m); heading clockwise from magnetic north (deg)")
+        if (pdrConfig != null) json.put("config", pdrConfig.toJson())
+        pdrState.keys().forEach { json.put(it, pdrState.get(it)) }
+        return json
     }
 
     private fun segments(durationNs: Long): JSONArray {
@@ -280,8 +327,36 @@ class SessionWriter(
             .also { it.write(header + "\n") }
 }
 
+private const val PDR_FILE = "pdr.csv"
+
+private fun fmt(v: Double): String = String.format(java.util.Locale.US, "%.4f", v)
+
 object SessionStorage {
     private val exportedFiles = SensorStream.entries.map { it.fileName } + "gnss.csv" + "session.json"
+    /** 2.0 起才有；导出时存在就带上。 */
+    private val optionalFiles = listOf(PDR_FILE)
+
+    private fun directoryOf(context: Context, sessionId: String): File {
+        require(sessionId.matches(Regex("[A-Za-z0-9_-]+"))) { "记录编号无效" }
+        return File(File(context.filesDir, "sessions"), sessionId)
+    }
+
+    /** 用给定参数把一次记录的原始数据重新跑一遍 PDR（回放 / 标定 K），耗时操作，勿在主线程调用。 */
+    fun replay(context: Context, sessionId: String, config: PdrConfig): PdrEngine {
+        val directory = directoryOf(context, sessionId)
+        require(directory.isDirectory) { "采集记录不存在" }
+        return replayRecording(config) { name -> File(directory, name).takeIf { it.isFile }?.inputStream() }
+    }
+
+    fun delete(context: Context, sessionId: String) {
+        val directory = directoryOf(context, sessionId)
+        require(directory.isDirectory) { "采集记录不存在" }
+        val status = runCatching {
+            JSONObject(File(directory, "session.json").readText(StandardCharsets.UTF_8)).optString("status")
+        }.getOrNull()
+        require(status != "recording") { "正在采集的记录不能删除" }
+        check(directory.deleteRecursively()) { "删除失败" }
+    }
 
     fun recoverInterrupted(context: Context) {
         val root = File(context.filesDir, "sessions")
@@ -315,11 +390,23 @@ object SessionStorage {
                         status = json.optString("status", "unknown"),
                         durationSeconds = json.optLong("duration_ms") / 1000,
                         qualitySummary = qualitySummary(json),
+                        pdrSummary = pdrSummary(json),
                     )
                 }.getOrNull()
             }
             ?.sortedByDescending { it.id }
             ?: emptyList()
+    }
+
+    private fun pdrSummary(json: JSONObject): String? {
+        val pdr = json.optJSONObject("pdr") ?: return null
+        if (!pdr.optBoolean("enabled")) return "实时 PDR 未启用"
+        val k = pdr.optJSONObject("config")?.optDouble("weinberg_k")
+        return String.format(
+            java.util.Locale.US, "实时 PDR %d 步 · %.1f m · 终点 (%.1f, %.1f) m · K %.3f",
+            pdr.optInt("step_count"), pdr.optDouble("distance_m"),
+            pdr.optDouble("end_x_m"), pdr.optDouble("end_y_m"), k ?: Double.NaN,
+        )
     }
 
     private fun qualitySummary(json: JSONObject): String {
@@ -338,14 +425,14 @@ object SessionStorage {
     }
 
     fun exportZip(context: Context, sessionId: String, uri: Uri) {
-        require(sessionId.matches(Regex("[A-Za-z0-9_-]+")))
-        val directory = File(File(context.filesDir, "sessions"), sessionId)
+        val directory = directoryOf(context, sessionId)
         require(directory.isDirectory) { "采集记录不存在" }
         val output = context.contentResolver.openOutputStream(uri)
             ?: error("无法打开导出位置")
         output.use { raw ->
             ZipOutputStream(raw).use { zip ->
-                exportedFiles.forEach { name ->
+                val present = optionalFiles.filter { File(directory, it).isFile }
+                (exportedFiles + present).forEach { name ->
                     val file = File(directory, name)
                     require(file.isFile) { "缺少文件：$name" }
                     zip.putNextEntry(ZipEntry(name))

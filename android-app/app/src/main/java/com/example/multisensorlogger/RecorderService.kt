@@ -25,6 +25,8 @@ import android.os.VibrationEffect
 import android.os.PowerManager
 import android.os.Looper
 import android.os.SystemClock
+import com.example.multisensorlogger.pdr.PdrEngine
+import com.example.multisensorlogger.pdr.PdrSettings
 
 class RecorderService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
@@ -43,6 +45,8 @@ class RecorderService : Service(), SensorEventListener {
     private var startRequested = false
     private val registeredStreams = mutableSetOf<SensorStream>()
     private val waveforms = SensorStream.entries.associateWith { ArrayDeque<SamplePoint>() }
+    private var engine: PdrEngine? = null
+    private var pdrMessage = ""
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -112,6 +116,8 @@ class RecorderService : Service(), SensorEventListener {
                 .apply { setReferenceCounted(false); acquire(10 * 60 * 1_000L) }
             wakeLockRenewedAtMs = SystemClock.elapsedRealtime()
             sensors = SensorStream.entries.associateWith { sensorManager.getDefaultSensor(it.type) }
+            // 实时 PDR 需要三路 IMU 齐全；缺任何一路就只采集、不推算
+            val pdrConfig = PdrSettings.load(this).takeIf { sensors.values.all { it != null } }
             val session = SessionWriter(
                 context = this,
                 spec = spec,
@@ -119,8 +125,11 @@ class RecorderService : Service(), SensorEventListener {
                 locationProvider = locationSelection.provider,
                 locationPermission = locationSelection.permission,
                 initialWarnings = locationSelection.warnings,
+                pdrConfig = pdrConfig,
             )
             writer = session
+            engine = pdrConfig?.let { config -> PdrEngine(config).apply { onStep = { session.recordStep(it) } } }
+            pdrMessage = if (pdrConfig == null) "缺少加速度计、陀螺仪或磁力计，无法实时推算轨迹" else ""
             waveforms.values.forEach { it.clear() }
             registeredStreams.clear()
             lastCheckpointSecond = -1L
@@ -135,6 +144,11 @@ class RecorderService : Service(), SensorEventListener {
                     }
                 }
             }
+            if (engine != null && registeredStreams.size < SensorStream.entries.size) {
+                engine = null
+                pdrMessage = "传感器监听注册失败，本次不做实时推算"
+                session.addWarning(pdrMessage)
+            }
             session.setRegisteredStreams(registeredStreams)
             registerLocation(session)
             RecorderBus.update {
@@ -143,6 +157,11 @@ class RecorderService : Service(), SensorEventListener {
                     mode = spec.mode,
                     elapsedSeconds = 0,
                     segment = segmentFor(spec.mode, 0, spec.label),
+                    pdr = PdrUiState(
+                        enabled = engine != null,
+                        config = engine?.config ?: it.pdr.config,
+                        message = engine?.let { "初始对准：请保持静止" } ?: pdrMessage,
+                    ),
                     message = "正在采集，锁屏后继续记录；请保持姿态，开头和结尾各静止 5 秒",
                 )
             }
@@ -187,6 +206,28 @@ class RecorderService : Service(), SensorEventListener {
             }
         } catch (error: Exception) {
             failRecording("${stream.title}数据写入失败：${error.message}")
+            return
+        }
+        feedPdr(stream, event)
+    }
+
+    /** 推算出错只停掉 PDR，原始数据照常记录。 */
+    private fun feedPdr(stream: SensorStream, event: SensorEvent) {
+        val pdr = engine ?: return
+        if (event.values.size < 3) return
+        val x = event.values[0].toDouble()
+        val y = event.values[1].toDouble()
+        val z = event.values[2].toDouble()
+        try {
+            when (stream) {
+                SensorStream.ACCELEROMETER -> pdr.addAccel(event.timestamp, x, y, z)
+                SensorStream.GYROSCOPE -> pdr.addGyro(event.timestamp, x, y, z)
+                SensorStream.MAGNETOMETER -> pdr.addMag(event.timestamp, x, y, z)
+            }
+        } catch (error: Exception) {
+            engine = null
+            pdrMessage = "实时推算出错，已停止推算（原始数据继续记录）：${error.message}"
+            writer?.addWarning(pdrMessage)
         }
     }
 
@@ -219,6 +260,7 @@ class RecorderService : Service(), SensorEventListener {
             }
             if (elapsedSeconds >= lastCheckpointSecond + 5) {
                 try {
+                    engine?.let { session.updatePdr(it) }
                     session.checkpoint()
                     lastCheckpointSecond = elapsedSeconds
                 } catch (error: Exception) {
@@ -265,8 +307,30 @@ class RecorderService : Service(), SensorEventListener {
                 segment = segment,
                 streams = streamStatus,
                 location = location,
+                pdr = pdrStatus(it.pdr),
             )
         }
+    }
+
+    private fun pdrStatus(previous: PdrUiState): PdrUiState {
+        val pdr = engine ?: return previous.copy(enabled = false, message = pdrMessage)
+        // 步列表只增不减，长度没变就复用旧列表，省得每 250 ms 复制一遍
+        val steps = if (previous.steps.size == pdr.steps.size && previous.enabled) previous.steps else pdr.steps.toList()
+        return PdrUiState(
+            enabled = true,
+            config = pdr.config,
+            aligning = pdr.aligning,
+            alignedSeconds = pdr.alignedSeconds,
+            headingDeg = pdr.headingDeg,
+            steps = steps,
+            distanceM = pdr.distanceM,
+            message = when {
+                pdr.samples == 0 -> "等待三路传感器数据"
+                pdr.aligning -> "初始对准：请保持静止"
+                steps.isEmpty() -> "对准完成，可以开始走了"
+                else -> "实时推算中"
+            },
+        )
     }
 
     private fun failRecording(message: String) {
@@ -284,10 +348,17 @@ class RecorderService : Service(), SensorEventListener {
         val session = writer
         writer = null
         startRequested = false
+        if (session == null) engine = null
         if (session != null) {
+            engine?.let { pdr ->
+                // 末端补齐后把还在等确认的最后几步写进 pdr.csv
+                runCatching { pdr.finish() }
+                session.updatePdr(pdr)
+            }
             val elapsed = (SystemClock.elapsedRealtimeNanos() - session.startedElapsedNs) / 1_000_000_000L
             val segment = segmentFor(session.spec.mode, elapsed, session.spec.label)
             publishState(session, elapsed, segment)
+            engine = null
             try {
                 session.close(status)
                 RecorderBus.update {

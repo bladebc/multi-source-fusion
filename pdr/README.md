@@ -37,6 +37,7 @@ uv run python run_pdr.py ../data/session_20261006_081737_496_fe4b5910.zip --trim
 | `run_pdr.py` | 主程序：全链跑一遍并出图；目录里有 `gt.csv` 时额外计算误差和 α 扫描 | |
 | `run_anchor.py` | 在老师的锚数据上复现第 5 次课的数字，用来验证算法写对了 | 第 5 次课 |
 | `sim.py` | 生成带真值的仿真步行数据（绕 40×20 m 矩形），埋了陀螺零偏和一段磁干扰 | |
+| `export_app_reference.py` | 把一条记录的逐步结果导出成 JSON，作为 App 内 Kotlin 引擎的对拍基准（见 `android-app/README.md`） | |
 
 ## 算法要点
 
