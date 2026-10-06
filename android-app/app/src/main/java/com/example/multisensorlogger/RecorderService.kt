@@ -20,6 +20,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Vibrator
+import android.os.VibrationEffect
+import android.os.PowerManager
 import android.os.Looper
 import android.os.SystemClock
 
@@ -29,6 +32,8 @@ class RecorderService : Service(), SensorEventListener {
     private lateinit var recordingThread: HandlerThread
     private lateinit var worker: Handler
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLockRenewedAtMs = 0L
     private var writer: SessionWriter? = null
     private var sensors: Map<SensorStream, Sensor?> = emptyMap()
     private var locationSelection = LocationSelection(null, "未授权", emptyList())
@@ -102,6 +107,10 @@ class RecorderService : Service(), SensorEventListener {
 
     private fun beginRecording(spec: SessionSpec) {
         try {
+            wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "multisensorlogger:recording")
+                .apply { setReferenceCounted(false); acquire(10 * 60 * 1_000L) }
+            wakeLockRenewedAtMs = SystemClock.elapsedRealtime()
             sensors = SensorStream.entries.associateWith { sensorManager.getDefaultSensor(it.type) }
             val session = SessionWriter(
                 context = this,
@@ -126,6 +135,7 @@ class RecorderService : Service(), SensorEventListener {
                     }
                 }
             }
+            session.setRegisteredStreams(registeredStreams)
             registerLocation(session)
             RecorderBus.update {
                 it.copy(
@@ -133,7 +143,7 @@ class RecorderService : Service(), SensorEventListener {
                     mode = spec.mode,
                     elapsedSeconds = 0,
                     segment = segmentFor(spec.mode, 0, spec.label),
-                    message = "正在采集，锁屏后会继续记录",
+                    message = "正在采集，锁屏后继续记录；请保持姿态，开头和结尾各静止 5 秒",
                 )
             }
             worker.post(ticker)
@@ -172,7 +182,7 @@ class RecorderService : Service(), SensorEventListener {
             session.recordSensor(stream, event)
             if (event.values.size >= 3) {
                 val wave = waveforms.getValue(stream)
-                wave.addLast(SamplePoint(event.values[0], event.values[1], event.values[2]))
+                wave.addLast(SamplePoint(event.values[0], event.values[1], event.values[2], event.timestamp))
                 while (wave.size > 180) wave.removeFirst()
             }
         } catch (error: Exception) {
@@ -185,6 +195,11 @@ class RecorderService : Service(), SensorEventListener {
     private val ticker = object : Runnable {
         override fun run() {
             val session = writer ?: return
+            // Renew only while a session is active; the timeout bounds an abandoned lock.
+            if (SystemClock.elapsedRealtime() - wakeLockRenewedAtMs >= 5 * 60 * 1_000L) {
+                wakeLock?.acquire(10 * 60 * 1_000L)
+                wakeLockRenewedAtMs = SystemClock.elapsedRealtime()
+            }
             val elapsedNs = SystemClock.elapsedRealtimeNanos() - session.startedElapsedNs
             val elapsedSeconds = elapsedNs / 1_000_000_000L
             val limit = session.spec.mode.durationSeconds
@@ -194,6 +209,10 @@ class RecorderService : Service(), SensorEventListener {
             }
             val segment = segmentFor(session.spec.mode, elapsedSeconds, session.spec.label)
             if (segment != lastSegment) {
+                if (lastSegment.isNotEmpty() && session.spec.mode == CaptureMode.PREVIEW) {
+                    (getSystemService(VIBRATOR_SERVICE) as Vibrator)
+                        .vibrate(VibrationEffect.createOneShot(250, VibrationEffect.DEFAULT_AMPLITUDE))
+                }
                 lastSegment = segment
                 (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
                     .notify(NOTIFICATION_ID, notification("正在采集：$segment"))
@@ -260,6 +279,8 @@ class RecorderService : Service(), SensorEventListener {
         worker.removeCallbacks(ticker)
         sensorManager.unregisterListener(this)
         runCatching { locationManager.removeUpdates(locationListener) }
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         val session = writer
         writer = null
         startRequested = false

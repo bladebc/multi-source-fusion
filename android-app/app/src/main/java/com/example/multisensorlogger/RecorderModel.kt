@@ -22,7 +22,7 @@ enum class CaptureMode(val title: String, val durationSeconds: Int?) {
     WALK("10 分钟步行", 600),
 }
 
-data class SamplePoint(val x: Float, val y: Float, val z: Float)
+data class SamplePoint(val x: Float, val y: Float, val z: Float, val timestampNs: Long = 0)
 
 data class StreamStatus(
     val available: Boolean = false,

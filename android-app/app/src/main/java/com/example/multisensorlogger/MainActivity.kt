@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.SensorManager
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -35,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -43,6 +45,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -54,10 +61,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var exportLauncher: ActivityResultLauncher<String>
     private var pendingSpec: SessionSpec? = null
     private var pendingExportId: String? = null
+    private var preparationJob: Job? = null
+    private var preparationSeconds by mutableIntStateOf(0)
     private var savedSessions by mutableStateOf<List<SavedSession>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingExportId = savedInstanceState?.getString("pending_export_id")
         locationPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { requestNotificationThenStart() }
@@ -86,12 +96,38 @@ class MainActivity : ComponentActivity() {
                         onLabelChange = { label = it },
                         posture = posture,
                         onPostureChange = { posture = it },
-                        onStart = { mode -> startCapture(SessionSpec(mode, label, posture)) },
+                        preparationSeconds = preparationSeconds,
+                        onStart = { mode -> prepareCapture(SessionSpec(mode, label, posture)) },
+                        onCancelPreparation = {
+                            preparationJob?.cancel()
+                            preparationJob = null
+                            preparationSeconds = 0
+                        },
                         onStop = { stopCapture() },
                         onExport = { beginExport(it) },
                         onRefresh = { refreshSavedSessions() },
                     )
                 }
+            }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pending_export_id", pendingExportId)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun prepareCapture(spec: SessionSpec) {
+        if (preparationJob?.isActive == true || pendingSpec != null || RecorderBus.state.value.recording) return
+        preparationJob = lifecycleScope.launch {
+            try {
+                for (seconds in 5 downTo 1) {
+                    preparationSeconds = seconds
+                    delay(1_000)
+                }
+                startCapture(spec)
+            } finally {
+                preparationSeconds = 0
             }
         }
     }
@@ -106,10 +142,38 @@ class MainActivity : ComponentActivity() {
     private fun updateSensorAvailability() {
         if (RecorderBus.state.value.recording) return
         val manager = getSystemService(SENSOR_SERVICE) as SensorManager
+        val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val gpsOn = runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+        val networkOn = runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        val permission = when {
+            fine -> "精确定位"
+            coarse -> "大致位置"
+            else -> "未授权"
+        }
+        val provider = when {
+            fine && gpsOn -> "gps"
+            (fine || coarse) && networkOn -> "network"
+            else -> "未启用"
+        }
+        val locationMessage = when {
+            !fine && !coarse -> "尚未授予位置权限；开始采集时会请求"
+            !fine -> "仅有大致位置权限，无法采集 GNSS 位置点"
+            !gpsOn -> "精确定位已授权，但手机的定位总开关或 GPS 未开启"
+            else -> "GNSS 权限和 GPS 已开启；采集时仍需等待卫星定位"
+        }
         RecorderBus.update { previous ->
-            previous.copy(streams = SensorStream.entries.associateWith { stream ->
-                previous.streams[stream].orEmpty().copy(available = manager.getDefaultSensor(stream.type) != null)
-            })
+            previous.copy(
+                streams = SensorStream.entries.associateWith { stream ->
+                    previous.streams[stream].orEmpty().copy(available = manager.getDefaultSensor(stream.type) != null)
+                },
+                location = previous.location.copy(
+                    permission = permission,
+                    provider = provider,
+                    message = locationMessage,
+                ),
+            )
         }
     }
 
@@ -191,6 +255,8 @@ private fun AppScreen(
     onLabelChange: (String) -> Unit,
     posture: String,
     onPostureChange: (String) -> Unit,
+    preparationSeconds: Int,
+    onCancelPreparation: () -> Unit,
     onStart: (CaptureMode) -> Unit,
     onStop: () -> Unit,
     onExport: (SavedSession) -> Unit,
@@ -216,7 +282,11 @@ private fun AppScreen(
                     }
                 }
             }
-            if (!recorder.recording) {
+            if (preparationSeconds > 0) {
+                Text("${preparationSeconds} 秒后开始，请固定持机姿态；开始后先静止 5 秒")
+                OutlinedButton(onClick = onCancelPreparation) { Text("取消准备") }
+            }
+            if (!recorder.recording && preparationSeconds == 0) {
                 OutlinedTextField(
                     value = label,
                     onValueChange = onLabelChange,
@@ -265,6 +335,7 @@ private fun AppScreen(
                             Text(session.title, fontWeight = FontWeight.SemiBold)
                             Text(session.startedAt, style = MaterialTheme.typography.bodySmall)
                             Text("${session.durationSeconds} 秒 · ${statusText(session.status)}", style = MaterialTheme.typography.bodySmall)
+                            Text(session.qualitySummary, style = MaterialTheme.typography.bodySmall)
                         }
                         OutlinedButton(onClick = { onExport(session) }, enabled = session.status != "recording") {
                             Text("导出 ZIP")
@@ -330,7 +401,18 @@ private fun Waveform(points: List<SamplePoint>) {
         if (points.size < 2) return@Canvas
         val maxAbsolute = points.maxOf { maxOf(kotlin.math.abs(it.x), kotlin.math.abs(it.y), kotlin.math.abs(it.z)) }
             .coerceAtLeast(0.01f)
-        val scale = size.height * 0.43f / maxAbsolute
+        val scale = size.height * 0.36f / maxAbsolute
+        val startNs = points.first().timestampNs
+        val spanNs = (points.last().timestampNs - startNs).coerceAtLeast(1L)
+        val paint = android.graphics.Paint().apply {
+            color = android.graphics.Color.DKGRAY
+            textSize = 10.dp.toPx()
+            isAntiAlias = true
+        }
+        drawContext.canvas.nativeCanvas.drawText("±${formatDecimal(maxAbsolute.toDouble())}", 4.dp.toPx(), 12.dp.toPx(), paint)
+        drawContext.canvas.nativeCanvas.drawText("0 s", 4.dp.toPx(), size.height - 3.dp.toPx(), paint)
+        val duration = "${formatDecimal(spanNs / 1_000_000_000.0)} s"
+        drawContext.canvas.nativeCanvas.drawText(duration, size.width - paint.measureText(duration) - 4.dp.toPx(), size.height - 3.dp.toPx(), paint)
         listOf(
             AxisX to { p: SamplePoint -> p.x },
             AxisY to { p: SamplePoint -> p.y },
@@ -338,7 +420,7 @@ private fun Waveform(points: List<SamplePoint>) {
         ).forEach { (color, value) ->
             val path = Path()
             points.forEachIndexed { index, point ->
-                val x = index.toFloat() * size.width / (points.size - 1)
+                val x = (point.timestampNs - startNs).toFloat() * size.width / spanNs
                 val y = middle - value(point) * scale
                 if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
