@@ -56,4 +56,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // android.jar 里的 org.json 在 JVM 单元测试中只是空壳，对拍测试读基准 JSON 用真实实现
+    testImplementation("org.json:json:20260814")
 }
