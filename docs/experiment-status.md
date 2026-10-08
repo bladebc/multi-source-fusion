@@ -51,4 +51,4 @@
 
 PR 作者历史记录：OPPO Android 12 上完成界面走查与 19 秒实时/离线对拍。这些记录来自 PR 描述，本次未独立复跑真机流程。本次 ADB 无连接设备；ZIP 系统文件选择器导出、页面重建、锁屏连续采集、走廊 60 秒实走、闭合路线与投屏仍未完成本次真机验证。代码合并不代表课程现场验收完成。
 
-本次独立复跑：Android `assembleDebug`、`testDebugUnitTest`、`lintDebug` 通过，12 项单元测试通过（含两条真实记录对拍、断流/缺流/非有限值、长时间静止缓存与停走对照）；Lint 0 错误、5 项既有版本提示。Python 10 项回归通过（本机 Python 3.12，依赖版本符合声明；仓库 CI 使用声明的 Python 3.13）。`git diff --check` 通过。
+本次独立复跑：Android `assembleDebug`、`testDebugUnitTest`、`lintDebug` 通过，12 项单元测试通过（含两条真实记录对拍、断流/缺流/非有限值、长时间静止缓存与停走对照）；Lint 0 错误、5 项既有警告（版本更新、targetSdk 与 SDK 条件提示）。Python 10 项回归通过（本机 Python 3.12，依赖版本符合声明；仓库 CI 使用声明的 Python 3.13）。`git diff --check` 通过。
