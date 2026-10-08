@@ -8,54 +8,36 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.nativeCanvas
+import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
+import com.example.multisensorlogger.pdr.PdrConfig
+import com.example.multisensorlogger.pdr.PdrSettings
+import com.example.multisensorlogger.ui.AppActions
+import com.example.multisensorlogger.ui.AppScreen
+import com.example.multisensorlogger.ui.AppTheme
+import com.example.multisensorlogger.ui.Toast
+import com.example.multisensorlogger.ui.fmt3
+import com.example.multisensorlogger.ui.formatStartedAt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import java.util.Locale
+import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity() {
+/** 只负责系统交互：权限、启动/停止采集服务、文件导出、设置持久化；界面在 ui/ 包。 */
+class MainActivity : ComponentActivity(), AppActions {
     private lateinit var locationPermissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var exportLauncher: ActivityResultLauncher<String>
@@ -64,10 +46,21 @@ class MainActivity : ComponentActivity() {
     private var preparationJob: Job? = null
     private var preparationSeconds by mutableIntStateOf(0)
     private var savedSessions by mutableStateOf<List<SavedSession>>(emptyList())
+    private var pdrConfig by mutableStateOf(PdrConfig())
+    private var label by mutableStateOf("自由采集")
+    private var posture by mutableStateOf("手持固定姿态")
+    private var toast by mutableStateOf<Toast?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         pendingExportId = savedInstanceState?.getString("pending_export_id")
+        savedInstanceState?.getString("pending_mode")?.let { mode ->
+            CaptureMode.entries.firstOrNull { it.name == mode }?.let {
+                pendingSpec = SessionSpec(it, savedInstanceState.getString("pending_label", "自由采集"),
+                    savedInstanceState.getString("pending_posture", "手持固定姿态"))
+            }
+        }
         locationPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { requestNotificationThenStart() }
@@ -78,44 +71,117 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.CreateDocument("application/zip"),
         ) { uri -> if (uri != null) exportTo(uri) }
 
-        if (!RecorderBus.state.value.recording) SessionStorage.recoverInterrupted(this)
+        pdrConfig = PdrSettings.load(this)
+        getSharedPreferences(CAPTURE_PREFS, MODE_PRIVATE).let {
+            label = it.getString("label", null) ?: label
+            posture = it.getString("posture", null) ?: posture
+        }
+        if (!RecorderBus.state.value.recording) {
+            SessionStorage.recoverInterrupted(this)
+            RecorderBus.update { it.copy(pdr = it.pdr.copy(config = pdrConfig)) }
+        }
         refreshSavedSessions()
+        showLatestTrackIfIdle()
         updateSensorAvailability()
 
         setContent {
             val recorder by RecorderBus.state.collectAsState()
-            var label by rememberSaveable { mutableStateOf("自由采集") }
-            var posture by rememberSaveable { mutableStateOf("手持固定姿态") }
             LaunchedEffect(recorder.lastSavedSessionId) { refreshSavedSessions() }
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    AppScreen(
-                        recorder = recorder,
-                        sessions = savedSessions,
-                        label = label,
-                        onLabelChange = { label = it },
-                        posture = posture,
-                        onPostureChange = { posture = it },
-                        preparationSeconds = preparationSeconds,
-                        onStart = { mode -> prepareCapture(SessionSpec(mode, label, posture)) },
-                        onCancelPreparation = {
-                            preparationJob?.cancel()
-                            preparationJob = null
-                            preparationSeconds = 0
-                        },
-                        onStop = { stopCapture() },
-                        onExport = { beginExport(it) },
-                        onRefresh = { refreshSavedSessions() },
-                    )
-                }
+            // 采集时保持亮屏：投屏演示不黑屏；停止后恢复系统默认
+            LaunchedEffect(recorder.recording) {
+                if (recorder.recording) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            AppTheme {
+                AppScreen(
+                    recorder = recorder,
+                    sessions = savedSessions,
+                    preparationSeconds = preparationSeconds,
+                    label = label,
+                    posture = posture,
+                    config = pdrConfig,
+                    toast = toast,
+                    actions = this,
+                )
             }
         }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("pending_export_id", pendingExportId)
+        pendingSpec?.let {
+            outState.putString("pending_mode", it.mode.name)
+            outState.putString("pending_label", it.label)
+            outState.putString("pending_posture", it.posture)
+        }
         super.onSaveInstanceState(outState)
     }
+
+    override fun onResume() {
+        super.onResume()
+        if (!RecorderBus.state.value.recording) SessionStorage.recoverInterrupted(this)
+        refreshSavedSessions()
+        updateSensorAvailability()
+    }
+
+    private fun showToast(text: String) {
+        toast = Toast((toast?.id ?: 0) + 1, text)
+    }
+
+    // ---------------------------------------------------------------- AppActions
+
+    override fun start(mode: CaptureMode) {
+        prepareCapture(SessionSpec(mode, label, posture))
+    }
+
+    override fun stop() {
+        startService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_STOP))
+    }
+
+    override fun cancelPreparation() {
+        preparationJob?.cancel()
+        preparationJob = null
+        preparationSeconds = 0
+    }
+
+    override fun export(session: SavedSession) {
+        pendingExportId = session.id
+        exportLauncher.launch("session_${session.id}.zip")
+    }
+
+    override fun delete(session: SavedSession) {
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { SessionStorage.delete(this@MainActivity, session.id) } }
+            showToast(result.fold({ "已删除" }, { "删除失败：${it.message}" }))
+            refreshSavedSessions()
+        }
+    }
+
+    override fun refreshSessions() = refreshSavedSessions()
+
+    override fun saveSettings(label: String, posture: String, config: PdrConfig) {
+        this.label = label
+        this.posture = posture
+        getSharedPreferences(CAPTURE_PREFS, MODE_PRIVATE).edit {
+            putString("label", label)
+            putString("posture", posture)
+        }
+        applyConfig(config)
+        showToast(if (RecorderBus.state.value.recording) "已保存，下次采集生效" else "已保存")
+    }
+
+    override fun saveK(k: Double) {
+        applyConfig(pdrConfig.copy(k = k))
+        showToast("K 已保存为 ${fmt3(k)}，下次采集生效")
+    }
+
+    private fun applyConfig(config: PdrConfig) {
+        PdrSettings.save(this, config)
+        pdrConfig = config
+        if (!RecorderBus.state.value.recording) RecorderBus.update { it.copy(pdr = it.pdr.copy(config = config)) }
+    }
+
+    // ---------------------------------------------------------------- 采集启动链：倒计时 → 定位权限 → 通知权限 → 前台服务
 
     private fun prepareCapture(spec: SessionSpec) {
         if (preparationJob?.isActive == true || pendingSpec != null || RecorderBus.state.value.recording) return
@@ -130,55 +196,6 @@ class MainActivity : ComponentActivity() {
                 preparationSeconds = 0
             }
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (!RecorderBus.state.value.recording) SessionStorage.recoverInterrupted(this)
-        refreshSavedSessions()
-        updateSensorAvailability()
-    }
-
-    private fun updateSensorAvailability() {
-        if (RecorderBus.state.value.recording) return
-        val manager = getSystemService(SENSOR_SERVICE) as SensorManager
-        val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
-        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val gpsOn = runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
-        val networkOn = runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
-        val permission = when {
-            fine -> "精确定位"
-            coarse -> "大致位置"
-            else -> "未授权"
-        }
-        val provider = when {
-            fine && gpsOn -> "gps"
-            (fine || coarse) && networkOn -> "network"
-            else -> "未启用"
-        }
-        val locationMessage = when {
-            !fine && !coarse -> "尚未授予位置权限；开始采集时会请求"
-            !fine -> "仅有大致位置权限，无法采集 GNSS 位置点"
-            !gpsOn -> "精确定位已授权，但手机的定位总开关或 GPS 未开启"
-            else -> "GNSS 权限和 GPS 已开启；采集时仍需等待卫星定位"
-        }
-        RecorderBus.update { previous ->
-            previous.copy(
-                streams = SensorStream.entries.associateWith { stream ->
-                    previous.streams[stream].orEmpty().copy(available = manager.getDefaultSensor(stream.type) != null)
-                },
-                location = previous.location.copy(
-                    permission = permission,
-                    provider = provider,
-                    message = locationMessage,
-                ),
-            )
-        }
-    }
-
-    private fun refreshSavedSessions() {
-        savedSessions = SessionStorage.list(this)
     }
 
     private fun startCapture(spec: SessionSpec) {
@@ -219,228 +236,80 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun stopCapture() {
-        startService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_STOP))
+    // ---------------------------------------------------------------- 记录与状态
+
+    private fun refreshSavedSessions() {
+        savedSessions = SessionStorage.list(this)
     }
 
-    private fun beginExport(session: SavedSession) {
-        pendingExportId = session.id
-        exportLauncher.launch("session_${session.id}.zip")
+    /**
+     * 进程被系统回收或被划掉后，内存里的实时轨迹就没了；没在采集时从最近一条记录的 pdr.csv 读回来，
+     * 演示前后切出 App 再回来，轨迹页仍有内容。
+     */
+    private fun showLatestTrackIfIdle() {
+        val state = RecorderBus.state.value
+        if (state.recording || state.pdr.steps.isNotEmpty()) return
+        val latest = savedSessions.firstOrNull { it.pdrSummary != null && it.status != "recording" } ?: return
+        lifecycleScope.launch {
+            val steps = withContext(Dispatchers.IO) { SessionStorage.loadPdrSteps(this@MainActivity, latest.id) }
+            if (steps.isNullOrEmpty() || RecorderBus.state.value.recording) return@launch
+            RecorderBus.update {
+                it.copy(
+                    pdr = it.pdr.copy(steps = steps, distanceM = steps.sumOf { s -> s.length }, headingDeg = null),
+                    message = "上次记录 ${formatStartedAt(latest.startedAt)}",
+                )
+            }
+        }
     }
 
     private fun exportTo(uri: Uri) {
         val sessionId = pendingExportId ?: return
         pendingExportId = null
-        Thread {
-            val result = runCatching { SessionStorage.exportZip(this, sessionId, uri) }
-            runOnUiThread {
-                RecorderBus.update {
-                    it.copy(message = result.fold(
-                        onSuccess = { "ZIP 已导出" },
-                        onFailure = { error -> "导出失败：${error.message}" },
-                    ))
-                }
-            }
-        }.start()
-    }
-}
-
-private fun StreamStatus?.orEmpty() = this ?: StreamStatus()
-
-@Composable
-private fun AppScreen(
-    recorder: RecorderUiState,
-    sessions: List<SavedSession>,
-    label: String,
-    onLabelChange: (String) -> Unit,
-    posture: String,
-    onPostureChange: (String) -> Unit,
-    preparationSeconds: Int,
-    onCancelPreparation: () -> Unit,
-    onStart: (CaptureMode) -> Unit,
-    onStop: () -> Unit,
-    onExport: (SavedSession) -> Unit,
-    onRefresh: () -> Unit,
-) {
-    Scaffold { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("多源传感器采集", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("本地原始数据 · 加速度计 / 陀螺仪 / 磁力计 / GNSS", style = MaterialTheme.typography.bodyMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (recorder.recording) "● 正在采集" else "○ 未采集", fontWeight = FontWeight.Bold)
-                    Text(recorder.message)
-                    if (recorder.recording) {
-                        Text("${recorder.mode?.title ?: "采集"} · ${formatDuration(recorder.elapsedSeconds)} · ${recorder.segment}")
-                        Button(onClick = onStop) { Text("停止并保存") }
-                    }
-                }
-            }
-            if (preparationSeconds > 0) {
-                Text("${preparationSeconds} 秒后开始，请固定持机姿态；开始后先静止 5 秒")
-                OutlinedButton(onClick = onCancelPreparation) { Text("取消准备") }
-            }
-            if (!recorder.recording && preparationSeconds == 0) {
-                OutlinedTextField(
-                    value = label,
-                    onValueChange = onLabelChange,
-                    label = { Text("手动采集标签") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = posture,
-                    onValueChange = onPostureChange,
-                    label = { Text("持机姿态备注") },
-                    supportingText = { Text("预演建议全程保持同一种固定姿态") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Button(onClick = { onStart(CaptureMode.MANUAL) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("开始手动采集")
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { onStart(CaptureMode.PREVIEW) }, modifier = Modifier.weight(1f)) {
-                        Text("40 秒预演")
-                    }
-                    OutlinedButton(onClick = { onStart(CaptureMode.WALK) }, modifier = Modifier.weight(1f)) {
-                        Text("10 分钟步行")
-                    }
-                }
-            }
-
-            Text("实时波形", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            SensorStream.entries.forEach { stream ->
-                SensorCard(stream, recorder.streams[stream].orEmpty())
-            }
-            LocationCard(recorder.location)
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("本机采集记录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                OutlinedButton(onClick = onRefresh) { Text("刷新") }
-            }
-            if (sessions.isEmpty()) Text("还没有采集记录。")
-            sessions.forEach { session ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(session.title, fontWeight = FontWeight.SemiBold)
-                            Text(session.startedAt, style = MaterialTheme.typography.bodySmall)
-                            Text("${session.durationSeconds} 秒 · ${statusText(session.status)}", style = MaterialTheme.typography.bodySmall)
-                            Text(session.qualitySummary, style = MaterialTheme.typography.bodySmall)
-                        }
-                        OutlinedButton(onClick = { onExport(session) }, enabled = session.status != "recording") {
-                            Text("导出 ZIP")
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(16.dp))
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { SessionStorage.exportZip(this@MainActivity, sessionId, uri) } }
+            showToast(result.fold({ "ZIP 已导出" }, { "导出失败：${it.message}" }))
         }
     }
-}
 
-@Composable
-private fun SensorCard(stream: SensorStream, status: StreamStatus) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("${stream.title} · ${if (status.available) "可用" else "不可用"}", fontWeight = FontWeight.SemiBold)
-            Text("${status.count} 条 · 请求 50 Hz · 实测 ${formatRate(status.measuredHz)} · 最大间隔 ${formatDecimal(status.maxGapMs)} ms · 长间隔 ${status.longGapCount} 次",
-                style = MaterialTheme.typography.bodySmall)
-            val sample = status.latest
-            if (sample != null) {
-                Text("X ${formatDecimal(sample.x.toDouble())}  Y ${formatDecimal(sample.y.toDouble())}  Z ${formatDecimal(sample.z.toDouble())} ${stream.unit}",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Waveform(status.waveform)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("● X", color = AxisX, style = MaterialTheme.typography.bodySmall)
-                Text("● Y", color = AxisY, style = MaterialTheme.typography.bodySmall)
-                Text("● Z", color = AxisZ, style = MaterialTheme.typography.bodySmall)
-            }
+    private fun updateSensorAvailability() {
+        if (RecorderBus.state.value.recording) return
+        val manager = getSystemService(SENSOR_SERVICE) as SensorManager
+        val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val gpsOn = runCatching { locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)
+        val networkOn = runCatching { locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)
+        val permission = when {
+            fine -> "精确定位"
+            coarse -> "大致位置"
+            else -> "未授权"
+        }
+        val provider = when {
+            fine && gpsOn -> "gps"
+            (fine || coarse) && networkOn -> "network"
+            else -> "未启用"
+        }
+        val locationMessage = when {
+            !fine && !coarse -> "尚未授予位置权限；开始采集时会请求"
+            !fine -> "仅有大致位置权限，无法采集 GNSS 位置点"
+            !gpsOn -> "精确定位已授权，但手机的定位总开关或 GPS 未开启"
+            else -> "GNSS 权限和 GPS 已开启；采集时仍需等待卫星定位"
+        }
+        RecorderBus.update { previous ->
+            previous.copy(
+                streams = SensorStream.entries.associateWith { stream ->
+                    (previous.streams[stream] ?: StreamStatus()).copy(available = manager.getDefaultSensor(stream.type) != null)
+                },
+                location = previous.location.copy(
+                    permission = permission,
+                    provider = provider,
+                    message = locationMessage,
+                ),
+            )
         }
     }
-}
 
-@Composable
-private fun LocationCard(location: LocationStatus) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("GNSS / 位置", fontWeight = FontWeight.SemiBold)
-            Text("${location.permission} · 来源 ${location.provider} · ${location.count} 条 · 请求 1 Hz · 实测 ${formatRate(location.measuredHz)}",
-                style = MaterialTheme.typography.bodySmall)
-            Text("最大间隔 ${formatDecimal(location.maxGapMs)} ms · 长间隔 ${location.longGapCount} 次",
-                style = MaterialTheme.typography.bodySmall)
-            Text(location.message, style = MaterialTheme.typography.bodySmall)
-            if (location.latitude != null && location.longitude != null) {
-                Text("${formatCoordinate(location.latitude)}, ${formatCoordinate(location.longitude)} · 精度 ${location.accuracyMeters?.let { formatDecimal(it.toDouble()) + " m" } ?: "未知"}",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-        }
+    companion object {
+        private const val CAPTURE_PREFS = "capture"
     }
-}
-
-@Composable
-private fun Waveform(points: List<SamplePoint>) {
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(104.dp)
-            .background(Color(0xFFF1F4F8)),
-    ) {
-        val middle = size.height / 2f
-        drawLine(Color(0xFFCCD5DF), Offset(0f, middle), Offset(size.width, middle), 1.dp.toPx())
-        if (points.size < 2) return@Canvas
-        val maxAbsolute = points.maxOf { maxOf(kotlin.math.abs(it.x), kotlin.math.abs(it.y), kotlin.math.abs(it.z)) }
-            .coerceAtLeast(0.01f)
-        val scale = size.height * 0.36f / maxAbsolute
-        val startNs = points.first().timestampNs
-        val spanNs = (points.last().timestampNs - startNs).coerceAtLeast(1L)
-        val paint = android.graphics.Paint().apply {
-            color = android.graphics.Color.DKGRAY
-            textSize = 10.dp.toPx()
-            isAntiAlias = true
-        }
-        drawContext.canvas.nativeCanvas.drawText("±${formatDecimal(maxAbsolute.toDouble())}", 4.dp.toPx(), 12.dp.toPx(), paint)
-        drawContext.canvas.nativeCanvas.drawText("0 s", 4.dp.toPx(), size.height - 3.dp.toPx(), paint)
-        val duration = "${formatDecimal(spanNs / 1_000_000_000.0)} s"
-        drawContext.canvas.nativeCanvas.drawText(duration, size.width - paint.measureText(duration) - 4.dp.toPx(), size.height - 3.dp.toPx(), paint)
-        listOf(
-            AxisX to { p: SamplePoint -> p.x },
-            AxisY to { p: SamplePoint -> p.y },
-            AxisZ to { p: SamplePoint -> p.z },
-        ).forEach { (color, value) ->
-            val path = Path()
-            points.forEachIndexed { index, point ->
-                val x = (point.timestampNs - startNs).toFloat() * size.width / spanNs
-                val y = middle - value(point) * scale
-                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            }
-            drawPath(path, color, style = Stroke(width = 1.5.dp.toPx()))
-        }
-    }
-}
-
-private val AxisX = Color(0xFFD43F3A)
-private val AxisY = Color(0xFF18864A)
-private val AxisZ = Color(0xFF2966CC)
-
-private fun formatRate(value: Double?): String = value?.let { "${formatDecimal(it)} Hz" } ?: "—"
-private fun formatDecimal(value: Double): String = String.format(Locale.US, "%.1f", value)
-private fun formatCoordinate(value: Double): String = String.format(Locale.US, "%.6f", value)
-private fun formatDuration(seconds: Long): String = "%02d:%02d".format(seconds / 60, seconds % 60)
-private fun statusText(status: String): String = when (status) {
-    "completed" -> "已完成"
-    "interrupted" -> "中断"
-    "stopped" -> "手动停止"
-    "recording" -> "进行中"
-    else -> status
 }
