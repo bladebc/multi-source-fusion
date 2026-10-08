@@ -198,6 +198,11 @@ class SessionWriter(
             .put("dropped_out_of_order_samples", engine.droppedSamples)
     }
 
+    fun disablePdr(reason: String) {
+        pdrState.put("enabled", false).put("error", reason)
+        addWarning(reason)
+    }
+
     fun addWarning(warning: String) {
         if (warning !in warnings) warnings.add(warning)
     }

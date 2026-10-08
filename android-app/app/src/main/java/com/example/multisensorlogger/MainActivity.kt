@@ -55,6 +55,12 @@ class MainActivity : ComponentActivity(), AppActions {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         pendingExportId = savedInstanceState?.getString("pending_export_id")
+        savedInstanceState?.getString("pending_mode")?.let { mode ->
+            CaptureMode.entries.firstOrNull { it.name == mode }?.let {
+                pendingSpec = SessionSpec(it, savedInstanceState.getString("pending_label", "自由采集"),
+                    savedInstanceState.getString("pending_posture", "手持固定姿态"))
+            }
+        }
         locationPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { requestNotificationThenStart() }
@@ -103,6 +109,11 @@ class MainActivity : ComponentActivity(), AppActions {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("pending_export_id", pendingExportId)
+        pendingSpec?.let {
+            outState.putString("pending_mode", it.mode.name)
+            outState.putString("pending_label", it.label)
+            outState.putString("pending_posture", it.posture)
+        }
         super.onSaveInstanceState(outState)
     }
 

@@ -78,4 +78,36 @@ class PdrEngineSyntheticTest {
         assertEquals(e.distanceM, e.steps.sumOf { it.length }, 1e-6)
         assertTrue(hypot(e.x, e.y) > 0)
     }
+    @Test
+    fun stationaryPauseAfterWalkingReleasesRawHistory() {
+        val e = walk(1.8, listOf(10.0 to 0.0), staticS = 610.0)
+        assertTrue(e.steps.isNotEmpty())
+        val field = PdrEngine::class.java.getDeclaredField("store").apply { isAccessible = true }
+        val store = field.get(e)
+        val base = store.javaClass.getDeclaredField("base").apply { isAccessible = true }.getInt(store)
+        assertTrue("Raw history must be released during the final static interval", e.samples - base < 1000)
+        assertEquals(e.distanceM, e.steps.sumOf { it.length }, 1e-6)
+    }
+
+    @Test
+    fun walkingAfterLongPauseMatchesUntrimmedEngine() {
+        val live = PdrEngine()
+        val reference = PdrEngine()
+        PdrEngine::class.java.getDeclaredField("lastTrim").apply { isAccessible = true }.setInt(reference, Int.MAX_VALUE)
+        for (i in 0..33000) {
+            val t = i / 50.0
+            val moving = t in 5.0..15.0 || t in 625.0..635.0
+            val acceleration = g + if (moving) 2.0 * sin(2 * PI * 1.8 * t) else 0.0
+            for (e in listOf(live, reference)) {
+                val ns = i * 20_000_000L
+                e.addAccel(ns, 0.0, 0.0, acceleration)
+                e.addGyro(ns, 0.0, 0.0, 0.0)
+                e.addMag(ns, 0.0, 20.0, -40.0)
+            }
+        }
+        live.finish(); reference.finish()
+        assertTrue(live.steps.any { it.timeS > 625 })
+        assertEquals(reference.steps, live.steps)
+    }
+
 }

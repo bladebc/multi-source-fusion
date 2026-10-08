@@ -76,6 +76,7 @@ class PdrEngine(val config: PdrConfig = PdrConfig()) {
     private var lastStepIndex = -1
     private var finished = false
     private var lastTrim = 0
+    private var archivedValley = Double.POSITIVE_INFINITY
 
     var psi0: Double? = null
         private set
@@ -228,8 +229,8 @@ class PdrEngine(val config: PdrConfig = PdrConfig()) {
             var peak = Double.NEGATIVE_INFINITY
             for (j in max(0, k - peakHalf)..min(nS - 1, k + peakHalf)) peak = max(peak, store.accSm(j))
             val lo = if (lastStepIndex >= 0) lastStepIndex else max(0, k - firstValleyBack)
-            var valley = Double.POSITIVE_INFINITY
-            for (j in lo..k) valley = min(valley, store.accSm(j))
+            var valley = archivedValley
+            for (j in max(lo, store.base)..k) valley = min(valley, store.accSm(j))
             val length = stepLength(peak, valley, config.model, config.k)
             val psi = store.psi(k)
             val r = Math.toRadians(psi)
@@ -237,6 +238,7 @@ class PdrEngine(val config: PdrConfig = PdrConfig()) {
             y += length * cos(r)
             distanceM += length
             lastStepIndex = k
+            archivedValley = Double.POSITIVE_INFINITY
             val step = PdrStep(
                 number = steps.size + 1,
                 timeS = (store.tNs(k) - gridOriginNs!!) / 1e9,
@@ -253,13 +255,15 @@ class PdrEngine(val config: PdrConfig = PdrConfig()) {
         }
     }
 
-    /** 丢掉以后再也用不到的旧点，长时间采集内存不随时长增长（站着不动时保留到上一步为止）。 */
+    /** 丢掉以后再也用不到的旧点，原始网格缓存保持有界；静止期间只累计上一步以来的谷值（轨迹步列表随步数增长）。 */
     private fun trim() {
         lastTrim = store.nRaw
-        var keep = minOf(nB - gLo - 1, nS - sLo - 1, scan - 1, nH - 1)
+        var keep = minOf(nB - gLo - 1, nS - sLo - 1, scan - firstValleyBack - peakHalf, nH - 1)
         if (cluster.isNotEmpty()) keep = min(keep, cluster.first() - firstValleyBack - peakHalf)
         if (pending.isNotEmpty()) keep = min(keep, pending.first() - firstValleyBack - peakHalf)
-        if (lastStepIndex >= 0) keep = min(keep, lastStepIndex)
+        if (lastStepIndex >= 0 && keep > store.base) {
+            for (j in max(lastStepIndex, store.base) until keep) archivedValley = min(archivedValley, store.accSm(j))
+        }
         if (psi0 == null) keep = 0
         store.trimBefore(keep)
     }
@@ -272,7 +276,8 @@ class PdrEngine(val config: PdrConfig = PdrConfig()) {
         private val cols = 17
         private var buf = DoubleArray(cols * 1024)
         private var times = LongArray(1024)
-        private var base = 0
+        var base = 0
+            private set
         var nRaw = 0
             private set
 

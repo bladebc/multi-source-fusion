@@ -147,7 +147,7 @@ class RecorderService : Service(), SensorEventListener {
             if (engine != null && registeredStreams.size < SensorStream.entries.size) {
                 engine = null
                 pdrMessage = "传感器监听注册失败，本次不做实时推算"
-                session.addWarning(pdrMessage)
+                session.disablePdr(pdrMessage)
             }
             session.setRegisteredStreams(registeredStreams)
             registerLocation(session)
@@ -225,9 +225,10 @@ class RecorderService : Service(), SensorEventListener {
                 SensorStream.MAGNETOMETER -> pdr.addMag(event.timestamp, x, y, z)
             }
         } catch (error: Exception) {
+            writer?.updatePdr(pdr)
             engine = null
             pdrMessage = "实时推算出错，已停止推算（原始数据继续记录）：${error.message}"
-            writer?.addWarning(pdrMessage)
+            writer?.disablePdr(pdrMessage)
         }
     }
 
@@ -352,7 +353,9 @@ class RecorderService : Service(), SensorEventListener {
         if (session != null) {
             engine?.let { pdr ->
                 // 末端补齐后把还在等确认的最后几步写进 pdr.csv
-                runCatching { pdr.finish() }
+                runCatching { pdr.finish() }.onFailure {
+                    session.addWarning("PDR 尾部处理失败：${it.message}")
+                }
                 session.updatePdr(pdr)
             }
             val elapsed = (SystemClock.elapsedRealtimeNanos() - session.startedElapsedNs) / 1_000_000_000L

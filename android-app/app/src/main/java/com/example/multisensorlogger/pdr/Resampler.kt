@@ -13,6 +13,7 @@ class Resampler(private val fs: Double, private val onSample: (GridSample) -> Un
     private val queues = Array(3) { ArrayDeque<Raw>() }
     private var originNs: Long? = null
     private var next = 0L
+    private var firstNs: Long? = null
 
     /** 网格 0 点对应的开机时间戳（ns）；三路都到齐前为 null。 */
     val gridOriginNs: Long? get() = originNs
@@ -22,12 +23,17 @@ class Resampler(private val fs: Double, private val onSample: (GridSample) -> Un
         private set
 
     fun add(kind: Int, tNs: Long, x: Double, y: Double, z: Double) {
+        require(x.isFinite() && y.isFinite() && z.isFinite()) { "传感器包含非有限读数" }
         val q = queues[kind]
         val last = q.lastOrNull()
         if (last != null && tNs <= last.tNs) {
             droppedCount++
             return
         }
+        require(last == null || tNs - last.tNs <= 100_000_000L) { "传感器断流超过 100 ms" }
+        val start = firstNs ?: tNs.also { firstNs = it }
+        val waitingSince = originNs?.let { gridNs(next) } ?: start
+        require(tNs - waitingSince <= 5_000_000_000L) { "等待三路传感器同步超过 5 s" }
         q.addLast(Raw(tNs, x, y, z))
         if (originNs == null) {
             if (queues.any { it.isEmpty() }) return
