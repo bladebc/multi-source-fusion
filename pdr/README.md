@@ -89,7 +89,7 @@ uv run python run_pdr.py ../data/session_20261006_081737_496_fe4b5910.zip --trim
 ## 待办
 
 - [ ] 用 A/B/C 三段真实数据调参（阈值、K、α），整理成报告里的「参数选择及理由」
-- [ ] 确认期中验收是否要求在 App 里**实时**显示轨迹；如果要，把 `pdr.py` 的三个函数移植进 `android-app/`
+- [ ] 按第 6 次课已明确的验收要求，将三个函数移植进 Android App，完成走廊 60 s 实走和实时轨迹投屏（见 [验收规范](../docs/acceptance.md)）
 - [ ] 进阶：Mahony 9 轴姿态滤波（课程代码库 `mahony_ahrs.py`）
 
 ## 输入检查与回归测试
@@ -99,3 +99,5 @@ uv run python run_pdr.py ../data/session_20261006_081737_496_fe4b5910.zip --trim
 `--calib` 时间相对三路 IMU 的共同起点，要求 `裁剪起点 ≤ T0 < T1 ≤ 记录结束时间`、距离为正且区间内有有效步。轨迹误差按每个检测步的时间插值真值，只统计真值覆盖时刻；末次共同时间误差与整个记录的闭合终点误差应区分。
 
 运行 `uv run python -m unittest discover -s tests -v` 执行 10 项回归测试。GitHub Actions 在 push 和 PR 时运行相同测试。更新后仿真及仓库样例 ZIP 全链均通过；仿真数字仅验证算法流程，不能替代真实步行精度验收。课件锚数据尚未重新下载验证，表中对应数字保留为原作者的历史结果。
+
+课程要求和当前缺口统一维护在 [项目 docs](../docs/README.md)。本工具是离线分析实现，尚不能替代 Android 实时验收。
